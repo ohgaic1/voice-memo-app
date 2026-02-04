@@ -5,7 +5,7 @@ from openai import OpenAI
 import google.generativeai as genai
 
 # タイトル
-st.title("🎙️ AI議事録 & レポート作成 (複数ファイル対応版)")
+st.title("🎙️ AI議事録 & レポート作成")
 st.caption("OpenAI Whisper (文字起こし) + Gemini (要約)")
 
 # サイドバー設定
@@ -13,10 +13,21 @@ with st.sidebar:
     st.header("🔑 設定")
     openai_key = st.text_input("OpenAI API Key (sk-...)", type="password")
     gemini_key = st.text_input("Gemini API Key (AIza...)", type="password")
+    
     st.divider()
-    st.info("※OpenAI APIには「1ファイル25MBまで」の制限があります。長時間の録音は分割するか、圧縮してください。")
+    
+    # ★ここでモデルを選べるようにしました
+    st.header("⚙️ モデル選択")
+    model_name = st.selectbox(
+        "使用するGeminiモデル",
+        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+        index=0
+    )
+    
+    st.divider()
+    st.info("※OpenAI APIには「1ファイル25MBまで」の制限があります。")
 
-# 複数ファイルアップロードを有効化 (accept_multiple_files=True)
+# 複数ファイルアップロード
 uploaded_files = st.file_uploader(
     "音声ファイルをアップロード (mp3, m4a, wav)", 
     type=["mp3", "m4a", "wav"], 
@@ -27,25 +38,31 @@ if uploaded_files and openai_key and gemini_key:
     st.success(f"{len(uploaded_files)} 件のファイルを確認しました。")
     
     if st.button("🚀 一括処理を開始"):
-        # プログレスバーの準備
+        # プログレスバー
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # APIクライアントの準備
+        # API設定
         client = OpenAI(api_key=openai_key)
         genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 選択されたモデルを使用
+        try:
+            model = genai.GenerativeModel(model_name)
+        except Exception as e:
+            st.error(f"モデル設定エラー: {e}")
+            st.stop()
 
-        # 1つずつファイルを処理
+        # ループ処理
         for i, uploaded_file in enumerate(uploaded_files):
             try:
                 current_file_name = uploaded_file.name
                 status_text.text(f"処理中 ({i+1}/{len(uploaded_files)}): {current_file_name}")
                 
-                # --- 25MB制限のチェック ---
+                # 25MB制限チェック
                 file_size_mb = uploaded_file.size / (1024 * 1024)
                 if file_size_mb > 25:
-                    st.error(f"❌ エラー: {current_file_name} は {file_size_mb:.1f}MB あり、OpenAIの制限(25MB)を超えています。圧縮するか分割してください。")
+                    st.error(f"❌ {current_file_name} は {file_size_mb:.1f}MB あり、25MBを超えています。")
                     continue
 
                 # 一時ファイル作成
@@ -61,13 +78,13 @@ if uploaded_files and openai_key and gemini_key:
                         response_format="text"
                     )
                 
-                # 一時ファイル削除
                 os.remove(tmp_file_path)
 
                 # --- 要約 (Gemini) ---
                 prompt = f"""
                 以下のテキストは「{current_file_name}」の音声文字起こしです。
                 ビジネスレポート形式（タイトル、要約、ToDo）でまとめてください。
+                Markdown形式で出力してください。
                 
                 テキスト:
                 {transcript}
@@ -84,11 +101,9 @@ if uploaded_files and openai_key and gemini_key:
             except Exception as e:
                 st.error(f"⚠️ {current_file_name} の処理中にエラーが発生しました: {e}")
             
-            # 進捗バー更新
             progress_bar.progress((i + 1) / len(uploaded_files))
         
         status_text.text("すべての処理が完了しました！")
 
 elif not (openai_key and gemini_key):
     st.warning("👈 左のサイドバーにAPIキーを入力してください。")
-
