@@ -4,95 +4,91 @@ import tempfile
 from openai import OpenAI
 import google.generativeai as genai
 
-# タイトルと説明
-st.title("🎙️ AI議事録 & レポート作成")
-st.caption("OpenAI Whisper (耳) と Google Gemini (脳) を組み合わせた最強ツール")
+# タイトル
+st.title("🎙️ AI議事録 & レポート作成 (複数ファイル対応版)")
+st.caption("OpenAI Whisper (文字起こし) + Gemini (要約)")
 
-# サイドバーでAPIキー設定
+# サイドバー設定
 with st.sidebar:
     st.header("🔑 設定")
     openai_key = st.text_input("OpenAI API Key (sk-...)", type="password")
     gemini_key = st.text_input("Gemini API Key (AIza...)", type="password")
-    st.info("※キーはブラウザに一時的に保存されるだけで、外部には漏れません。")
+    st.divider()
+    st.info("※OpenAI APIには「1ファイル25MBまで」の制限があります。長時間の録音は分割するか、圧縮してください。")
 
-# ファイルアップロード
-uploaded_file = st.file_uploader("音声ファイルをアップロード (mp3, m4a, wav)", type=["mp3", "m4a", "wav"])
+# 複数ファイルアップロードを有効化 (accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "音声ファイルをアップロード (mp3, m4a, wav)", 
+    type=["mp3", "m4a", "wav"], 
+    accept_multiple_files=True
+)
 
-if uploaded_file and openai_key and gemini_key:
-    st.success("準備OK！ボタンを押して開始してください。")
+if uploaded_files and openai_key and gemini_key:
+    st.success(f"{len(uploaded_files)} 件のファイルを確認しました。")
     
-    if st.button("🚀 文字起こし＆レポート作成を開始"):
-        try:
-            # プログレスバーの表示
-            progress_text = "処理を開始します..."
-            my_bar = st.progress(0, text=progress_text)
+    if st.button("🚀 一括処理を開始"):
+        # プログレスバーの準備
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # APIクライアントの準備
+        client = OpenAI(api_key=openai_key)
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-            # 1. 一時ファイルとして保存 (Whisperはファイルパスが必要なため)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                tmp_file_path = tmp_file.name
+        # 1つずつファイルを処理
+        for i, uploaded_file in enumerate(uploaded_files):
+            try:
+                current_file_name = uploaded_file.name
+                status_text.text(f"処理中 ({i+1}/{len(uploaded_files)}): {current_file_name}")
+                
+                # --- 25MB制限のチェック ---
+                file_size_mb = uploaded_file.size / (1024 * 1024)
+                if file_size_mb > 25:
+                    st.error(f"❌ エラー: {current_file_name} は {file_size_mb:.1f}MB あり、OpenAIの制限(25MB)を超えています。圧縮するか分割してください。")
+                    continue
 
-            # 2. OpenAI (Whisper) 設定
-            client = OpenAI(api_key=openai_key)
-            
-            # --- 音声処理 ---
-            my_bar.progress(30, text="👂 音声を聞き取っています (Whisper)...")
-            
-            with open(tmp_file_path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1", 
-                    file=audio_file,
-                    response_format="text"
-                )
-            
-            # 一時ファイルの削除
-            os.remove(tmp_file_path)
+                # 一時ファイル作成
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{current_file_name.split('.')[-1]}") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
 
-            st.subheader("📝 文字起こし結果")
-            with st.expander("全文を確認する"):
-                st.text_area("原文", transcript, height=200)
-            
-            # --- 要約処理 (Gemini) ---
-            my_bar.progress(70, text="🧠 レポートを作成しています (Gemini)...")
-            
-            genai.configure(api_key=gemini_key)
-            # モデルは最新のFlashを使用（高速・高性能）
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            
-            prompt = f"""
-            あなたはプロの書記です。以下のテキストは会議の録音です。
-            内容を整理し、以下のフォーマットで議事録を作成してください。
+                # --- 文字起こし (Whisper) ---
+                with open(tmp_file_path, "rb") as audio_file:
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1", 
+                        file=audio_file,
+                        response_format="text"
+                    )
+                
+                # 一時ファイル削除
+                os.remove(tmp_file_path)
 
-            ## 1. タイトル
-            （30文字以内で内容を要約）
+                # --- 要約 (Gemini) ---
+                prompt = f"""
+                以下のテキストは「{current_file_name}」の音声文字起こしです。
+                ビジネスレポート形式（タイトル、要約、ToDo）でまとめてください。
+                
+                テキスト:
+                {transcript}
+                """
+                response = model.generate_content(prompt)
 
-            ## 2. エグゼクティブサマリー
-            （200文字程度で全体の要点をまとめる）
+                # --- 結果表示 ---
+                with st.expander(f"✅ {current_file_name} のレポート", expanded=True):
+                    st.markdown(response.text)
+                    st.divider()
+                    st.caption("文字起こし原文")
+                    st.text_area("原文", transcript, height=150, key=f"text_{i}")
 
-            ## 3. 議題と決定事項
-            - [議題1]
-              - 詳細: ...
-            - [議題2]
-              - 詳細: ...
-
-            ## 4. ネクストアクション（ToDo）
-            - [担当者] 期限: タスク内容
-
-            ---
-            【音声テキスト】
-            {transcript}
-            """
+            except Exception as e:
+                st.error(f"⚠️ {current_file_name} の処理中にエラーが発生しました: {e}")
             
-            response = model.generate_content(prompt)
-            
-            my_bar.progress(100, text="✅ 完了しました！")
-            
-            st.divider()
-            st.subheader("📊 AIレポート")
-            st.markdown(response.text)
-            
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
+            # 進捗バー更新
+            progress_bar.progress((i + 1) / len(uploaded_files))
+        
+        status_text.text("すべての処理が完了しました！")
 
 elif not (openai_key and gemini_key):
-    st.warning("👈 左のサイドバーに2つのAPIキーを入力してください。")
+    st.warning("👈 左のサイドバーにAPIキーを入力してください。")
+
