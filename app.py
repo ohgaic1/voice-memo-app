@@ -4,106 +4,117 @@ import tempfile
 from openai import OpenAI
 import google.generativeai as genai
 
-# タイトル
-st.title("🎙️ AI議事録 & レポート作成")
-st.caption("OpenAI Whisper (文字起こし) + Gemini (要約)")
+# ページ設定
+st.set_page_config(page_title="AI議事録アプリ", page_icon="🎙️")
 
-# サイドバー設定
+st.title("🎙️ AI議事録 & レポート作成")
+st.caption("最新のAIモデルを自動検出して使用します")
+
+# --- サイドバー：設定 ---
 with st.sidebar:
-    st.header("🔑 設定")
+    st.header("🔑 APIキー設定")
     openai_key = st.text_input("OpenAI API Key (sk-...)", type="password")
     gemini_key = st.text_input("Gemini API Key (AIza...)", type="password")
     
     st.divider()
     
-    # ★ここでモデルを選べるようにしました
-    st.header("⚙️ モデル選択")
-    model_name = st.selectbox(
-        "使用するGeminiモデル",
-        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
-        index=0
-    )
-    
-    st.divider()
-    st.info("※OpenAI APIには「1ファイル25MBまで」の制限があります。")
+    # モデル選択機能（キーがある場合のみリストを取得）
+    available_models = []
+    if gemini_key:
+        try:
+            genai.configure(api_key=gemini_key)
+            # 使えるモデル一覧を取得
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    # モデル名から 'models/' を取り除く
+                    name = m.name.replace('models/', '')
+                    available_models.append(name)
+        except Exception as e:
+            st.error(f"Geminiキーのエラー: {e}")
 
-# 複数ファイルアップロード
+    # リストが空ならデフォルト値を表示
+    if not available_models:
+        available_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+    
+    st.header("⚙️ モデル選択")
+    # デフォルトで gemini-1.5-flash を優先的に選ぶ
+    default_index = 0
+    for i, m in enumerate(available_models):
+        if "flash" in m:
+            default_index = i
+            break
+            
+    selected_model = st.selectbox("使用するモデル", available_models, index=default_index)
+    st.caption(f"選択中: {selected_model}")
+
+# --- メイン処理 ---
 uploaded_files = st.file_uploader(
-    "音声ファイルをアップロード (mp3, m4a, wav)", 
+    "音声ファイルをアップロード", 
     type=["mp3", "m4a", "wav"], 
     accept_multiple_files=True
 )
 
 if uploaded_files and openai_key and gemini_key:
-    st.success(f"{len(uploaded_files)} 件のファイルを確認しました。")
+    st.success(f"準備完了！ 使用モデル: {selected_model}")
     
     if st.button("🚀 一括処理を開始"):
-        # プログレスバー
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # API設定
+        # APIクライアント準備
         client = OpenAI(api_key=openai_key)
         genai.configure(api_key=gemini_key)
-        
-        # 選択されたモデルを使用
-        try:
-            model = genai.GenerativeModel(model_name)
-        except Exception as e:
-            st.error(f"モデル設定エラー: {e}")
-            st.stop()
+        model = genai.GenerativeModel(selected_model) # 選択したモデルを使用
 
-        # ループ処理
         for i, uploaded_file in enumerate(uploaded_files):
             try:
-                current_file_name = uploaded_file.name
-                status_text.text(f"処理中 ({i+1}/{len(uploaded_files)}): {current_file_name}")
+                current_name = uploaded_file.name
+                status_text.text(f"▶ 処理中: {current_name}")
                 
-                # 25MB制限チェック
-                file_size_mb = uploaded_file.size / (1024 * 1024)
-                if file_size_mb > 25:
-                    st.error(f"❌ {current_file_name} は {file_size_mb:.1f}MB あり、25MBを超えています。")
-                    continue
-
+                # 1. 音声処理 (Whisper)
                 # 一時ファイル作成
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{current_file_name.split('.')[-1]}") as tmp_file:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{current_name.split('.')[-1]}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
+                
+                # 25MBチェック
+                if os.path.getsize(tmp_file_path) > 25 * 1024 * 1024:
+                    st.error(f"❌ {current_name} はサイズが大きすぎます(25MB超)。")
+                    os.remove(tmp_file_path)
+                    continue
 
-                # --- 文字起こし (Whisper) ---
+                # 文字起こし実行
                 with open(tmp_file_path, "rb") as audio_file:
                     transcript = client.audio.transcriptions.create(
                         model="whisper-1", 
                         file=audio_file,
                         response_format="text"
                     )
-                
                 os.remove(tmp_file_path)
 
-                # --- 要約 (Gemini) ---
+                # 2. 要約処理 (Gemini)
                 prompt = f"""
-                以下のテキストは「{current_file_name}」の音声文字起こしです。
-                ビジネスレポート形式（タイトル、要約、ToDo）でまとめてください。
-                Markdown形式で出力してください。
+                以下のテキストは会議の録音です。
+                内容を整理し、ビジネスレポート形式（タイトル、要約、ToDo）で出力してください。
                 
                 テキスト:
                 {transcript}
                 """
+                
                 response = model.generate_content(prompt)
 
-                # --- 結果表示 ---
-                with st.expander(f"✅ {current_file_name} のレポート", expanded=True):
+                # 結果表示
+                with st.expander(f"✅ レポート: {current_name}", expanded=True):
                     st.markdown(response.text)
                     st.divider()
-                    st.caption("文字起こし原文")
-                    st.text_area("原文", transcript, height=150, key=f"text_{i}")
+                    st.text_area("文字起こし原文", transcript, height=100)
 
             except Exception as e:
-                st.error(f"⚠️ {current_file_name} の処理中にエラーが発生しました: {e}")
+                st.error(f"⚠️ エラー ({current_name}): {e}")
             
             progress_bar.progress((i + 1) / len(uploaded_files))
         
-        status_text.text("すべての処理が完了しました！")
+        status_text.success("すべての処理が完了しました！")
 
 elif not (openai_key and gemini_key):
     st.warning("👈 左のサイドバーにAPIキーを入力してください。")
