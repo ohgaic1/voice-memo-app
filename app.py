@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import tempfile
 import datetime
-import re
 from openai import OpenAI
 import google.generativeai as genai
 
@@ -11,6 +10,14 @@ st.set_page_config(page_title="AI議事録Pro", page_icon="📝")
 
 st.title("📝 AI統合レポート作成ツール")
 st.caption("時系列順に結合して1つのレポートを作成します")
+
+# --- セッションステート初期化（一時保存用） ---
+if "report_text" not in st.session_state:
+    st.session_state.report_text = None
+if "full_transcript" not in st.session_state:
+    st.session_state.full_transcript = None
+if "file_names" not in st.session_state:
+    st.session_state.file_names = []
 
 # --- サイドバー：設定 ---
 with st.sidebar:
@@ -29,7 +36,7 @@ with st.sidebar:
     
     st.divider()
     
-    # モデル選択 (自動取得ロジック)
+    # モデル選択
     available_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
     if gemini_key:
         try:
@@ -41,8 +48,16 @@ with st.sidebar:
     # Flashを優先
     default_idx = next((i for i, m in enumerate(available_models) if "flash" in m), 0)
     selected_model = st.selectbox("使用モデル", available_models, index=default_idx)
+    
+    st.divider()
+    # リセットボタン（新しい解析を始めたいとき用）
+    if st.button("🗑️ 履歴をクリアしてリセット"):
+        st.session_state.report_text = None
+        st.session_state.full_transcript = None
+        st.session_state.file_names = []
+        st.rerun()
 
-# --- プロンプトのテンプレート定義 ---
+# --- プロンプト定義 ---
 prompts = {
     "会議・打ち合わせ": """
     あなたは優秀な書記です。以下のテキストは「会議」の録音です。
@@ -104,19 +119,15 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files and openai_key and gemini_key:
-    # 【重要】ファイル名でソートすることで「時系列順」を担保する
-    # 例: 2026-02-03 13_00.mp3 -> 2026-02-03 13_30.mp3 の順になる
+    # ファイル名でソート
     uploaded_files.sort(key=lambda x: x.name)
     
-    st.success(f"📂 以下の順序で結合して処理します（全 {len(uploaded_files)} ファイル）")
+    # アップロードされたファイル名が変わったらリセットするか確認（今回は簡易的にそのまま）
+    current_file_names = [f.name for f in uploaded_files]
     
-    # 処理順序をユーザーに確認させる表示
-    order_text = ""
-    for i, f in enumerate(uploaded_files):
-        order_text += f"{i+1}. {f.name}\n"
-    st.code(order_text, language=None)
-    
+    # 処理実行ボタン
     if st.button("🚀 レポート作成を開始"):
+        # プログレスバー
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -126,17 +137,15 @@ if uploaded_files and openai_key and gemini_key:
         
         full_transcript = ""
         
-        # 1. すべてのファイルを文字起こしして結合
+        # 1. 文字起こしループ
         for i, uploaded_file in enumerate(uploaded_files):
             try:
                 status_text.text(f"文字起こし中 ({i+1}/{len(uploaded_files)}): {uploaded_file.name}")
                 
-                # 一時ファイル処理
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
                 
-                # 文字起こし
                 with open(tmp_file_path, "rb") as audio_file:
                     transcript = client.audio.transcriptions.create(
                         model="whisper-1", 
@@ -146,7 +155,6 @@ if uploaded_files and openai_key and gemini_key:
                 
                 os.remove(tmp_file_path)
                 
-                # テキスト結合（ファイル名の見出しをつける）
                 full_transcript += f"\n\n--- 録音データ: {uploaded_file.name} ---\n\n"
                 full_transcript += transcript
                 
@@ -156,57 +164,54 @@ if uploaded_files and openai_key and gemini_key:
                 st.error(f"エラー ({uploaded_file.name}): {e}")
                 st.stop()
 
-        # 2. まとめてレポート作成
+        # 2. レポート作成
         status_text.text("🧠 AIがレポートを執筆中...")
         
         today_str = datetime.date.today().strftime('%Y-%m-%d')
         prompt_template = prompts[report_type].format(date=today_str)
-        
-        final_prompt = f"""
-        {prompt_template}
-        
-        【以下の結合テキストをもとに作成してください】
-        {full_transcript}
-        """
+        final_prompt = f"{prompt_template}\n\n【以下の結合テキストをもとに作成してください】\n{full_transcript}"
         
         try:
             response = model.generate_content(final_prompt)
-            report_text = response.text
+            
+            # --- 【重要】結果をセッションステートに保存 ---
+            st.session_state.report_text = response.text
+            st.session_state.full_transcript = full_transcript
+            st.session_state.file_names = current_file_names
             
             progress_bar.progress(100)
             status_text.success("完了しました！")
             
-            # 結果表示
-            st.divider()
-            st.subheader(f"📊 {report_type} レポート")
-            st.markdown(report_text)
-            
-            # ダウンロードボタン用ファイル名生成
-            # レポートの1行目（タイトル）を取得してみる
-            file_name_candidate = "report"
-            for line in report_text.split('\n'):
-                if line.startswith("# "):
-                    # # 2026-02-04 会議... -> 2026-02-04_会議...
-                    file_name_candidate = line.replace("# ", "").strip().replace(" ", "_").replace("/", "-")
-                    break
-            
-            if not file_name_candidate:
-                file_name_candidate = f"{today_str}_report"
-            
-            save_name = f"{file_name_candidate}.md"
-            
-            st.download_button(
-                label="💾 レポートを保存 (mdファイル)",
-                data=report_text,
-                file_name=save_name,
-                mime="text/markdown"
-            )
-            
-            with st.expander("文字起こし原文（結合版）を確認する"):
-                st.text_area("原文", full_transcript, height=200)
-                
         except Exception as e:
             st.error(f"レポート生成エラー: {e}")
+
+# --- 保存された結果があれば表示（ボタンを押した後も消えない） ---
+if st.session_state.report_text:
+    st.divider()
+    st.subheader(f"📊 {report_type} レポート")
+    
+    # レポート表示
+    st.markdown(st.session_state.report_text)
+    
+    # ダウンロードファイル名作成
+    today_str = datetime.date.today().strftime('%Y-%m-%d')
+    file_name_candidate = f"{today_str}_report"
+    for line in st.session_state.report_text.split('\n'):
+        if line.startswith("# "):
+            file_name_candidate = line.replace("# ", "").strip().replace(" ", "_").replace("/", "-")
+            break
+            
+    # ダウンロードボタン
+    st.download_button(
+        label="💾 レポートを保存 (mdファイル)",
+        data=st.session_state.report_text,
+        file_name=f"{file_name_candidate}.md",
+        mime="text/markdown"
+    )
+    
+    # 原文表示
+    with st.expander("文字起こし原文（結合版）を確認する"):
+        st.text_area("原文", st.session_state.full_transcript, height=200)
 
 elif not (openai_key and gemini_key):
     st.warning("👈 左のサイドバーにAPIキーを入力してください。")
