@@ -2,16 +2,15 @@ import streamlit as st
 import os
 import tempfile
 import datetime
-import google.generativeai as genai
 from openai import OpenAI
 
 # ページ設定
 st.set_page_config(page_title="AI議事録Pro", page_icon="📝")
 
-st.title("📝 AI統合レポート作成ツール")
-st.caption("時系列順に結合して1つのレポートを作成します")
+st.title("📝 AI統合レポート作成ツール (OpenAI版)")
+st.caption("OpenAI (Whisper + GPT-4o-mini) を使用して、確実・高速にレポートを作成します")
 
-# --- セッションステート初期化（結果の一時保存用） ---
+# --- セッションステート初期化 ---
 if "report_text" not in st.session_state:
     st.session_state.report_text = None
 if "full_transcript" not in st.session_state:
@@ -22,8 +21,8 @@ if "file_names" not in st.session_state:
 # --- サイドバー：設定 ---
 with st.sidebar:
     st.header("🔑 設定")
+    # Geminiのキーは不要になりました
     openai_key = st.text_input("OpenAI API Key (sk-...)", type="password")
-    gemini_key = st.text_input("Gemini API Key (AIza...)", type="password")
     
     st.divider()
     
@@ -35,23 +34,14 @@ with st.sidebar:
     )
     
     st.divider()
-    
-    # 【変更点】モデル選択（手動選択で gemini-pro をデフォルトにする）
-    st.header("⚙️ モデル設定")
-    model_options = ["gemini-pro", "gemini-1.5-flash", "gemini-1.5-pro"]
-    selected_model = st.selectbox(
-        "使用モデル (エラー時は gemini-pro を推奨)", 
-        model_options, 
-        index=0  # デフォルトを gemini-pro に設定（一番安定しているため）
-    )
-    
-    st.divider()
     # リセットボタン
     if st.button("🗑️ 履歴をクリアしてリセット"):
         st.session_state.report_text = None
         st.session_state.full_transcript = None
         st.session_state.file_names = []
         st.rerun()
+        
+    st.info("※GPT-4o-miniを使用します。非常に安価で高性能です。")
 
 # --- プロンプト定義 ---
 prompts = {
@@ -114,28 +104,23 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if uploaded_files and openai_key and gemini_key:
+if uploaded_files and openai_key:
     # ファイル名でソート
     uploaded_files.sort(key=lambda x: x.name)
     current_file_names = [f.name for f in uploaded_files]
     
-    # ファイル名が変わったらリセットするロジック（オプション）
     if st.session_state.file_names and st.session_state.file_names != current_file_names:
-        st.warning("⚠️ 新しいファイルが選択されました。「履歴をクリア」ボタンを押してリセットすることをお勧めします。")
+        st.warning("⚠️ ファイルが変更されました。「履歴をクリア」ボタンを押すことをお勧めします。")
 
     # 処理実行ボタン
     if st.button("🚀 レポート作成を開始"):
-        # プログレスバー
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         client = OpenAI(api_key=openai_key)
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel(selected_model)
-        
         full_transcript = ""
         
-        # 1. 文字起こしループ
+        # 1. 音声文字起こし (Whisper)
         for i, uploaded_file in enumerate(uploaded_files):
             try:
                 status_text.text(f"文字起こし中 ({i+1}/{len(uploaded_files)}): {uploaded_file.name}")
@@ -162,18 +147,29 @@ if uploaded_files and openai_key and gemini_key:
                 st.error(f"文字起こしエラー ({uploaded_file.name}): {e}")
                 st.stop()
 
-        # 2. レポート作成
-        status_text.text(f"🧠 AI({selected_model})がレポートを執筆中...")
+        # 2. レポート作成 (GPT-4o-mini)
+        status_text.text("🧠 AI (GPT-4o-mini) がレポートを執筆中...")
         
         today_str = datetime.date.today().strftime('%Y-%m-%d')
         prompt_template = prompts[report_type].format(date=today_str)
-        final_prompt = f"{prompt_template}\n\n【以下の結合テキストをもとに作成してください】\n{full_transcript}"
+        
+        system_prompt = "あなたはプロの議事録作成アシスタントです。ユーザーから提供された音声テキストを元に、指定されたフォーマットでレポートを作成してください。"
+        user_message = f"{prompt_template}\n\n【以下の結合テキストをもとに作成してください】\n{full_transcript}"
         
         try:
-            response = model.generate_content(final_prompt)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini", # ここで最新の軽量モデルを使用
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.3
+            )
             
-            # 結果をセッションステートに保存
-            st.session_state.report_text = response.text
+            report_content = response.choices[0].message.content
+            
+            # 結果を保存
+            st.session_state.report_text = report_content
             st.session_state.full_transcript = full_transcript
             st.session_state.file_names = current_file_names
             
@@ -182,16 +178,15 @@ if uploaded_files and openai_key and gemini_key:
             
         except Exception as e:
             st.error(f"レポート生成エラー: {e}")
-            st.error("ヒント: 左側の設定でモデルを「gemini-pro」に変更して再試行してください。")
 
-# --- 保存された結果があれば表示 ---
+# --- 結果表示 ---
 if st.session_state.report_text:
     st.divider()
     st.subheader(f"📊 {report_type} レポート")
     
     st.markdown(st.session_state.report_text)
     
-    # ダウンロードファイル名作成
+    # ファイル名生成
     today_str = datetime.date.today().strftime('%Y-%m-%d')
     file_name_candidate = f"{today_str}_report"
     for line in st.session_state.report_text.split('\n'):
@@ -209,5 +204,5 @@ if st.session_state.report_text:
     with st.expander("文字起こし原文（結合版）を確認する"):
         st.text_area("原文", st.session_state.full_transcript, height=200)
 
-elif not (openai_key and gemini_key):
-    st.warning("👈 左のサイドバーにAPIキーを入力してください。")
+elif not openai_key:
+    st.warning("👈 左のサイドバーにOpenAI APIキーを入力してください。")
